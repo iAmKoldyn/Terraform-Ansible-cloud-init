@@ -1,0 +1,5 @@
+---
+- import_playbook: 01-bootstrap-ssh.yml
+- import_playbook: 02-docker.yml
+- import_playbook: 03-swarm.yml
+- import_playbook: 04-haproxy-keepalived.yml

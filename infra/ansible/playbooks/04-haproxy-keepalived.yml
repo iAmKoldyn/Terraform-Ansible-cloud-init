@@ -1,0 +1,55 @@
+---
+- name: Configure HAProxy and Keepalived
+  hosts: lbs
+  become: true
+  vars_files:
+    - "{{ playbook_dir }}/../group_vars/all.yml"
+  tasks:
+    - name: Install haproxy and keepalived
+      ansible.builtin.apt:
+        name:
+          - haproxy
+          - keepalived
+        state: present
+        update_cache: true
+
+    - name: Render haproxy config
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/haproxy.cfg.j2"
+        dest: /etc/haproxy/haproxy.cfg
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart haproxy
+
+    - name: Render keepalived config
+      ansible.builtin.template:
+        src: "{{ playbook_dir }}/../templates/keepalived.conf.j2"
+        dest: /etc/keepalived/keepalived.conf
+        owner: root
+        group: root
+        mode: "0644"
+      notify: Restart keepalived
+
+    - name: Ensure haproxy service is enabled and running
+      ansible.builtin.service:
+        name: haproxy
+        state: started
+        enabled: true
+
+    - name: Ensure keepalived service is enabled and running
+      ansible.builtin.service:
+        name: keepalived
+        state: started
+        enabled: true
+
+  handlers:
+    - name: Restart haproxy
+      ansible.builtin.service:
+        name: haproxy
+        state: restarted
+
+    - name: Restart keepalived
+      ansible.builtin.service:
+        name: keepalived
+        state: restarted

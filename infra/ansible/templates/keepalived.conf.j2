@@ -1,0 +1,40 @@
+vrrp_script chk_haproxy {
+  script "pidof haproxy"
+  interval 2
+  weight 2
+}
+
+vrrp_instance VI_1 {
+{% if inventory_hostname == groups['lbs'][0] %}
+  state MASTER
+  priority 200
+{% else %}
+  state BACKUP
+  priority 150
+{% endif %}
+
+  interface {{ (vip_interface | default(hostonly_guest_interface, true)) | default('enp0s3', true) }}
+  virtual_router_id {{ keepalived_router_id }}
+  advert_int 1
+  authentication {
+    auth_type PASS
+    auth_pass {{ keepalived_auth_pass }}
+  }
+
+{% if groups['lbs'] | length > 1 %}
+  unicast_src_ip {{ ansible_host }}
+  unicast_peer {
+{% for host in groups['lbs'] if host != inventory_hostname %}
+    {{ hostvars[host].ansible_host }}
+{% endfor %}
+  }
+{% endif %}
+
+  virtual_ipaddress {
+    {{ vip_address }}/{{ vip_prefix }}
+  }
+
+  track_script {
+    chk_haproxy
+  }
+}

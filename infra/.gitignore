@@ -1,0 +1,7 @@
+cloud-init/build/
+ansible/inventory/hosts.ini
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/terraform.tfstate
+terraform/terraform.tfstate.backup
+terraform/terraform.tfstate.*

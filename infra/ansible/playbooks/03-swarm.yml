@@ -1,0 +1,62 @@
+---
+- name: Initialize Swarm on first manager
+  hosts: managers[0]
+  become: true
+  tasks:
+    - name: Check local swarm state
+      ansible.builtin.command: 'docker info --format {{ "{{.Swarm.LocalNodeState}}" }}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Initialize swarm
+      ansible.builtin.command: docker swarm init --advertise-addr {{ ansible_host }}
+      when: swarm_state.stdout != "active"
+
+    - name: Read manager join token
+      ansible.builtin.command: docker swarm join-token -q manager
+      register: manager_token
+      changed_when: false
+
+    - name: Read worker join token
+      ansible.builtin.command: docker swarm join-token -q worker
+      register: worker_token
+      changed_when: false
+
+    - name: Store join tokens on primary manager facts
+      ansible.builtin.set_fact:
+        swarm_manager_token: "{{ manager_token.stdout }}"
+        swarm_worker_token: "{{ worker_token.stdout }}"
+
+- name: Join additional managers
+  hosts: managers
+  become: true
+  tasks:
+    - name: Check local swarm state
+      ansible.builtin.command: 'docker info --format {{ "{{.Swarm.LocalNodeState}}" }}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Join manager node
+      ansible.builtin.command: >-
+        docker swarm join
+        --token {{ hostvars[groups['managers'][0]].swarm_manager_token }}
+        {{ hostvars[groups['managers'][0]].ansible_host }}:2377
+      when:
+        - inventory_hostname != groups['managers'][0]
+        - swarm_state.stdout != "active"
+
+- name: Join worker nodes
+  hosts: workers
+  become: true
+  tasks:
+    - name: Check local swarm state
+      ansible.builtin.command: 'docker info --format {{ "{{.Swarm.LocalNodeState}}" }}'
+      register: swarm_state
+      changed_when: false
+
+    - name: Join worker node
+      ansible.builtin.command: >-
+        docker swarm join
+        --token {{ hostvars[groups['managers'][0]].swarm_worker_token }}
+        {{ hostvars[groups['managers'][0]].ansible_host }}:2377
+      when: swarm_state.stdout != "active"

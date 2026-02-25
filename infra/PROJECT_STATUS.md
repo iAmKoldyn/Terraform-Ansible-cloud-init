@@ -1,0 +1,158 @@
+# Статус проекта
+
+Последнее обновление: 2026-02-24
+
+## Сделано
+- Создан каркас инфраструктуры `Terraform + Ansible + cloud-init` в каталоге `infra/`.
+- Добавлены скрипты автоматизации VM для VirtualBox:
+  - `infra/scripts/new-seed-iso.ps1`
+  - `infra/scripts/new-vm.ps1`
+  - `infra/scripts/remove-vm.ps1`
+  - `infra/scripts/tf-output-to-inventory.ps1`
+  - `infra/scripts/run-ansible-from-wsl.ps1`
+- Пользователь проекта переключен с `deploy` на `naurlox`:
+  - создание пользователя через cloud-init
+  - Ansible group vars и playbook-файлы
+  - пользователь по умолчанию в генерации inventory
+  - примеры в README
+- Протестирована генерация seed ISO с ключом `/mnt/c/Users/YOUR_WINDOWS_USER/.ssh/id_ed25519.pub`.
+- На текущей шаблонной VM (`ubuntu-22.04-docker-template`):
+  - подтвержден SSH-доступ под `naurlox`
+  - удален пользователь `deploy`
+  - проверено, что вход под `deploy` больше не работает
+  - принудительно включен `PasswordAuthentication no` для SSH
+- Изменен шаблон cloud-init, чтобы `50-cloud-init.conf` не включал парольный вход обратно.
+
+## Следующие шаги
+- Для полного соответствия заданию перейти со smoke-профиля (`1 manager + 1 worker + 1 lb`) на целевой профиль (`3 managers + 2 workers + 2 lb`).
+- Провести и зафиксировать failover-тесты:
+  - выключение одного manager (кворум должен сохраниться),
+  - выключение одного worker (сервис доступен),
+  - выключение активного LB (VIP переходит на backup LB).
+- Пересобрать финальный snapshot golden VM после полной очистки (`cloud-init`, `machine-id`, `ssh_host_*`), чтобы зафиксировать эталонный образ.
+- По желанию: вынести провижининг VM в отдельный модуль `infra/terraform-vsphere` для миграции на VMware, оставив Ansible-слой без изменений.
+
+## Журнал изменений
+- 2026-02-24:
+  - Добавлен начальный каркас проекта и скрипты автоматизации.
+  - Добавлена модель нод в Terraform (по умолчанию `3 manager + 2 worker + 2 lb`).
+  - Добавлены шаблоны cloud-init для bootstrap пользователя/ключа/сети.
+  - Добавлены Ansible playbook-файлы для SSH hardening, Docker, Swarm, HAProxy/Keepalived.
+  - Все конфиги проекта переведены с `deploy` на `naurlox`.
+  - Обновлен `infra/cloud-init/user-data.tpl`, чтобы отключение парольного входа фиксировалось в:
+    - `/etc/ssh/sshd_config.d/50-cloud-init.conf`
+    - `/etc/ssh/sshd_config.d/99-hardening.conf`
+  - Обезличены персональные пути к SSH-ключу в документации и примерах (`YOUR_WINDOWS_USER`).
+  - Добавлен roadmap-пункт по миграции инфраструктурного слоя на VMware.
+
+## Примечания
+- Этот файл является единым источником правды по проекту:
+  - что уже сделано
+  - что еще осталось
+  - какие изменения внесены и когда
+- Я буду обновлять этот файл на каждом значимом шаге.
+
+## Оперативный хотфикс (2026-02-24)
+- Выявлена причина нестабильного доступа: у клонов мог оставаться одинаковый IP из шаблона.
+- В `infra/cloud-init/user-data.tpl` добавлен принудительный netplan-файл `60-kp-static.yaml` с `__NODE_IP__/__PREFIX_LENGTH__`.
+- В `infra/scripts/new-seed-iso.ps1` добавлена подстановка `__NODE_IP__` и `__PREFIX_LENGTH__` также в `user-data`.
+- После этого ноды нужно пересоздать (`terraform destroy` -> `terraform apply`), чтобы каждая получила уникальный IP.
+- Дополнительно усилен `infra/cloud-init/user-data.tpl`:
+  - включен `ssh_deletekeys: true` (регенерация host keys через cloud-init);
+  - добавлено удаление старых netplan-файлов (`00-installer-config.yaml`, `50-cloud-init.yaml`) перед `netplan apply`;
+  - добавлен `ssh-keygen -A` и принудительный restart `ssh/sshd`.
+- Зафиксирован текущий риск: если golden VM не очищена (`cloud-init state + netplan + machine-id`), клоны могут снова наследовать старую сеть (например, `192.168.56.109`).
+- Обязательный шаг перед финальным snapshot golden VM:
+  - `sudo cloud-init clean --logs --seed`
+  - `sudo rm -rf /var/lib/cloud/*`
+  - `sudo rm -f /etc/netplan/00-installer-config.yaml /etc/netplan/50-cloud-init.yaml`
+  - `sudo truncate -s 0 /etc/machine-id && sudo rm -f /var/lib/dbus/machine-id`
+  - `sudo rm -f /etc/ssh/ssh_host_*`
+  - `sudo poweroff`
+- Проверка после `bootstrap_revision=v2`:
+  - Terraform пересоздал smoke-стенд (`1 manager + 1 worker + 1 lb`) успешно;
+  - с хоста доступны `192.168.56.11`, `192.168.56.21`, `192.168.56.31`;
+  - `192.168.56.109` не отвечает (что ожидаемо для нового стенда);
+  - SSH на `22/tcp` сейчас закрывается до баннера (`kex_exchange_identification: Connection closed by remote host`), требуется проверка `sshd`/host keys в консоли шаблона.
+- Проверка после `bootstrap_revision=v3`:
+  - удалена запись netplan из `write_files`, в `runcmd` добавлено полное удаление `/etc/netplan/*.yaml` и создание единственного `60-kp-static.yaml`;
+  - smoke-стенд пересоздан повторно;
+  - подтверждено с хоста: `.11/.21/.31` отвечают, `.109` не отвечает;
+  - проблема с ранним закрытием SSH-сессии (`Connection closed by ... port 22`) сохраняется и требует ручной проверки `sshd` внутри ВМ (через консоль VirtualBox).
+- Корневая причина найдена и исправлена (2026-02-24):
+  - `cloud-init` не применял `user-data` из seed ISO из-за BOM в начале файла (`\ufeff#cloud-config`);
+  - в `infra/scripts/new-seed-iso.ps1` запись `user-data/meta-data/network-config` переведена на UTF-8 без BOM;
+  - после пересоздания (`bootstrap_revision=v4`) ноды принимают корректные IP:
+    - `kp-manager-01 -> 192.168.56.11`
+    - `kp-worker-01 -> 192.168.56.21`
+    - `kp-lb-01 -> 192.168.56.31`
+  - проверка `ansible -i inventory/hosts.ini all -m ping` успешна для всех 3 нод.
+- Дополнительный фикс совместимости Windows PowerShell 5:
+  - `infra/scripts/tf-output-to-inventory.ps1` переведен с `ConvertFrom-Json -AsHashtable` на совместимый разбор `PSObject.Properties`;
+  - запись `hosts.ini` переведена на UTF-8 без BOM (иначе Ansible INI parser мог падать).
+- Отдельно зафиксировано по `192.168.56.109`:
+  - ноды внутри кластера видят `192.168.56.109` как `INCOMPLETE` (не локальный хост в host-only сегменте);
+  - проверка `ping -S 192.168.56.1 192.168.56.109` на Windows дает `Destination host unreachable`;
+  - вывод: `192.168.56.109` приходит с внешнего маршрута/адаптера (VPN/оверлей), его нельзя использовать как адрес ноды в этом проекте.
+- Отключен DHCP сервер VirtualBox для host-only сети (проект использует только статические IP):
+  - `VBoxManage dhcpserver modify --network="HostInterfaceNetworking-VirtualBox Host-Only Ethernet Adapter" --disable`
+- Архитектурные улучшения по best practice (2026-02-24):
+  - В `infra/terraform/variables.tf` убраны дефолты для сетевых параметров:
+    - `host_only_adapter`
+    - `cluster_cidr`
+    - `cluster_prefix_length`
+    - `manager_ip_start`
+    - `worker_ip_start`
+    - `lb_ip_start`
+  - Добавлены строгие проверки Terraform через `lifecycle.precondition` в `infra/terraform/main.tf`:
+    - соответствие `cluster_prefix_length` префиксу `cluster_cidr`;
+    - попадание диапазонов manager/worker/lb в подсеть;
+    - отсутствие пересечений диапазонов manager/worker/lb.
+  - Проверка валидации подтверждена:
+    - при пересечении диапазонов (`manager_ip_start == worker_ip_start`) `terraform plan` завершается ошибкой `Resource precondition failed`.
+- Переcоздание и запуск сервисов (2026-02-24):
+  - smoke-стенд пересоздан (`1 manager + 1 worker + 1 lb`) через `terraform destroy/apply` с `bootstrap_revision=v5`;
+  - подтверждено: до запуска Ansible Swarm был неинициализирован (`inactive`);
+  - `ansible-playbook playbooks/site.yml` отработал до этапа LB, Docker/Swarm подняты:
+    - manager: `kp-manager-01` (Leader),
+    - worker: `kp-worker-01` (Ready/Active).
+  - Исправлен конфликт пакетов Docker в `infra/ansible/playbooks/02-docker.yml`:
+    - перед установкой `docker.io` удаляются `containerd.io` и пакеты `docker-ce*`.
+  - Исправлена загрузка переменных для LB в `infra/ansible/playbooks/04-haproxy-keepalived.yml`:
+    - добавлен `vars_files: ../group_vars/all.yml`.
+  - Исправлен шаблон HAProxy в `infra/ansible/templates/haproxy.cfg.j2`:
+    - удален `daemon` (конфликтовал с systemd `-Ws`, из-за чего не поднимались bind `:80/:2377`).
+  - Проверка после фиксов:
+    - `docker` active/enabled на всех 3 нодах;
+    - `haproxy` и `keepalived` active/enabled на `kp-lb-01`;
+    - VIP `192.168.56.10` отвечает;
+    - тестовый Swarm сервис `web` (`nginx`, replicas=3) развернут;
+    - HTTP через VIP возвращает `200` и страницу `Welcome to nginx!`.
+  - Имена гостевых интерфейсов вынесены в переменные:
+    - `hostonly_guest_interface`
+    - `nat_guest_interface`
+  - Параметризация интерфейсов протянута в cloud-init:
+    - `infra/scripts/new-seed-iso.ps1` принимает и подставляет `HostOnlyInterface/NatInterface`;
+    - `infra/cloud-init/user-data.tpl` и `infra/cloud-init/network-config.tpl` больше не содержат хардкода `enp0s3/enp0s8`.
+  - Обновлены:
+    - `infra/terraform/terraform.tfvars.example` (обязательные сетевые переменные + интерфейсы);
+    - `infra/ansible/group_vars/all.yml` (`vip_interface` теперь берется из `hostonly_guest_interface`);
+    - `infra/README.md` (новая схема настройки переменных).
+- Финальная сверка и эксплуатационные правки (2026-02-24):
+  - подтверждено текущее состояние стенда:
+    - `VBoxManage list runningvms` -> `kp-manager-01`, `kp-worker-01`, `kp-lb-01`;
+    - `terraform validate` успешен;
+    - `ansible all -m ping` успешен для всех нод;
+    - `docker node ls` на manager показывает manager+worker в статусе `Ready/Active`;
+    - на LB активны `haproxy` и `keepalived`, VIP `192.168.56.10/24` назначен на host-only интерфейс;
+    - `curl -I http://192.168.56.10` возвращает `HTTP/1.1 200 OK`.
+  - улучшен `infra/scripts/run-ansible-from-wsl.ps1`:
+    - добавлен явный `ANSIBLE_CONFIG`, чтобы не зависеть от автопоиска `ansible.cfg` в `/mnt/c/...`;
+    - добавлен параметр `-DisableHostKeyChecking` (по умолчанию включен) для стабильного прогона после пересоздания VM.
+  - выполнен повторный полный прогон `.\run-ansible-from-wsl.ps1` (`playbooks/site.yml`): `failed=0`, `unreachable=0`, изменения `changed=0` (идемпотентность подтверждена).
+  - `infra/README.md` дополнен разделом `Операционные команды (runbook)`:
+    - полный старт,
+    - проверка состояния,
+    - применение изменений,
+    - масштабирование вверх/вниз,
+    - запуск второго независимого кластера (другой `vm_name_prefix` + другой `cluster_cidr`).

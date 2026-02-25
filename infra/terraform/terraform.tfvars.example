@@ -1,0 +1,17 @@
+template_vm_name    = "ubuntu-22.04-docker-template"
+host_only_adapter   = "VirtualBox Host-Only Ethernet Adapter"
+ssh_public_key_path = "/mnt/c/Users/YOUR_WINDOWS_USER/.ssh/id_ed25519.pub"
+vm_name_prefix      = "kp"
+
+cluster_cidr          = "192.168.56.0/24"
+cluster_prefix_length = 24
+manager_ip_start      = 11
+worker_ip_start       = 21
+lb_ip_start           = 31
+
+hostonly_guest_interface = "enp0s3"
+nat_guest_interface      = "enp0s8"
+
+managers_count = 3
+workers_count  = 2
+lbs_count      = 2

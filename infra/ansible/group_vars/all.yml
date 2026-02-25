@@ -1,0 +1,12 @@
+---
+ansible_user: naurlox
+ansible_python_interpreter: /usr/bin/python3
+
+hostonly_guest_interface: enp0s3
+nat_guest_interface: enp0s8
+
+vip_address: 192.168.56.10
+vip_prefix: 24
+vip_interface: "{{ hostonly_guest_interface }}"
+keepalived_router_id: 51
+keepalived_auth_pass: SWarmPass123

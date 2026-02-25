@@ -1,0 +1,34 @@
+global
+  log /dev/log local0
+  log /dev/log local1 notice
+
+defaults
+  mode http
+  log global
+  option httplog
+  option dontlognull
+  timeout connect 5s
+  timeout client 50s
+  timeout server 50s
+
+frontend swarm_http
+  bind *:80
+  default_backend swarm_http_nodes
+
+backend swarm_http_nodes
+  balance roundrobin
+{% for host in (groups['workers'] + groups['managers']) %}
+  server {{ host }} {{ hostvars[host].ansible_host }}:80 check
+{% endfor %}
+
+frontend swarm_managers
+  bind *:2377
+  mode tcp
+  default_backend swarm_managers_nodes
+
+backend swarm_managers_nodes
+  mode tcp
+  balance roundrobin
+{% for host in groups['managers'] %}
+  server {{ host }} {{ hostvars[host].ansible_host }}:2377 check
+{% endfor %}
