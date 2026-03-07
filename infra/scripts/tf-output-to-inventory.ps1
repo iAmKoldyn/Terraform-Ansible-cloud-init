@@ -1,7 +1,8 @@
 param(
   [string]$TerraformDir = "../terraform",
   [string]$OutputFile = "../ansible/inventory/hosts.ini",
-  [string]$AnsibleUser = "naurlox"
+  [string]$AnsibleUser = "naurlox",
+  [switch]$RefreshKnownHosts = $false
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,3 +73,8 @@ $lines += "ansible_python_interpreter=/usr/bin/python3"
 
 Write-Utf8NoBom -Path $OutputFile -Content ($lines -join "`n")
 Write-Host "Inventory generated: $OutputFile"
+
+if ($RefreshKnownHosts) {
+  $refreshScript = Join-Path $scriptDir "refresh-known-hosts.ps1"
+  & $refreshScript -Inventory $OutputFile
+}

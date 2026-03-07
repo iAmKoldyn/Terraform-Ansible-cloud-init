@@ -156,3 +156,53 @@
     - применение изменений,
     - масштабирование вверх/вниз,
     - запуск второго независимого кластера (другой `vm_name_prefix` + другой `cluster_cidr`).
+
+- Диагностика fresh-clone проблем после полного пересоздания (2026-03-07):
+  - после `terraform destroy/apply` воспроизведена нестабильная доступность SSH в первые минуты после старта;
+  - первопричина подтверждена в консоли `kp-manager-01`: `A start job is running for Wait for Network to be Configured`;
+  - вывод: проблема возникала не из-за `variables.tf`/`hosts.ini` и не из-за SSH-ключа, а из-за блокировки загрузки на `network-online`;
+  - исправление внесено в cloud-init:
+    - `infra/cloud-init/network-config.tpl`: оба интерфейса помечены как `optional: true`;
+    - `infra/cloud-init/user-data.tpl`: зеркальная правка netplan + отключение `systemd-networkd-wait-online.service` и `NetworkManager-wait-online.service` на последующих загрузках;
+  - `infra/terraform/terraform.tfvars` и `infra/terraform/terraform.tfvars.example` дополнены явным `bootstrap_revision = "v6"`, чтобы cloud-init изменения не терялись;
+  - после повторного пересоздания подтверждено:
+    - все ноды получают ожидаемые IP;
+    - SSH по ключу доступен на `.11/.12/.21/.22/.31`;
+    - `.\run-ansible-from-wsl.ps1` проходит без `failed/unreachable`;
+    - Swarm поднимается в составе `2 manager + 2 worker`, `kp-manager-01` = `Leader`, `kp-manager-02` = `Reachable`;
+    - `haproxy` и `keepalived` активны на `kp-lb-01`, VIP `192.168.56.10` назначен;
+    - после деплоя тестового сервиса `web` (`nginx`, replicas=3) `curl http://192.168.56.10` возвращает `HTTP/1.1 200 OK`.
+  - автоматизация host key hygiene (2026-03-07):
+    - добавлен `infra/scripts/refresh-known-hosts.ps1`;
+    - `infra/scripts/tf-output-to-inventory.ps1` поддерживает refresh `known_hosts` через `-RefreshKnownHosts`, но по умолчанию только генерирует inventory;
+    - `infra/scripts/run-ansible-from-wsl.ps1` выполняет основной preflight перед `ansible-playbook`:
+      - удаляет устаревшие записи IP кластера из Windows `known_hosts`;
+      - ждёт готовности SSH на всех хостах;
+      - добавляет актуальные host keys;
+    - проверено: после refresh обычный `ssh naurlox@192.168.56.11/.22/.31` больше не падает на `REMOTE HOST IDENTIFICATION HAS CHANGED`.
+  - ресурсный профиль для хоста с ~16 GB RAM (2026-03-07):
+    - в `infra/terraform/terraform.tfvars` и `infra/terraform/terraform.tfvars.example` добавлены явные лимиты:
+      - `manager_memory_mb = 2048`
+      - `worker_memory_mb = 1536`
+      - `lb_memory_mb = 1024`
+    - цель: удержать топологию `3 manager + 2 worker + 2 lb` в разумном бюджете памяти и не зависеть от тяжёлых дефолтов из `variables.tf`.
+  - устойчивость Ansible bootstrap на свежих Ubuntu-клонах (2026-03-07):
+    - в `infra/ansible/playbooks/02-docker.yml` добавлено ожидание освобождения `apt/dpkg` lock перед установкой `docker.io`;
+    - обе `apt`-операции получили `lock_timeout: 600`, чтобы не падать на `unattended-upgrades`;
+    - в `infra/ansible/playbooks/03-swarm.yml` добавлены явные `assert`-проверки наличия join-token на primary manager;
+    - цель: вместо каскадного `undefined variable swarm_manager_token` получать понятную причину: Docker/Swarm на первичном manager не инициализирован.
+  - диагностика отличий от Git и итоговая перепроверка (2026-03-07):
+    - `origin/main` и `HEAD` указывают на `4f79cc8`, а реальный стенд отличается локальным `infra/terraform/terraform.tfvars`, который не хранится в Git;
+    - критичное отличие от Git-версии по runtime: локально были снижены ресурсы VM (`manager=2048 MB`, `worker=1536 MB`, `lb=1024 MB`) относительно дефолтов из `variables.tf`;
+    - сравнение показало, что `refresh-known-hosts` и изменения в Ansible не влияют на boot VM, а лишь раньше выявляют неготовность SSH;
+    - после возврата памяти вверх ноды поднялись без boot-ошибок;
+    - повторный `.\run-ansible-from-wsl.ps1` завершился успешно: `failed=0`, `unreachable=0`;
+    - `docker node ls` показывает `2 manager + 2 worker` в статусе `Ready/Active`;
+    - `haproxy` и `keepalived` на `kp-lb-01` активны, VIP `192.168.56.10` назначен;
+    - HTTP `503` на VIP без развернутого приложения ожидаем: балансировщик поднят, но backend-сервис на `:80` не опубликован.
+  - финальная эксплуатационная проверка (2026-03-07):
+    - после деплоя `web` (`nginx:alpine`, `replicas=3`, `*:80->80/tcp`) `docker service ls` показывает `3/3`;
+    - `curl http://192.168.56.10` возвращает `200`, цепочка `VIP -> HAProxy -> Swarm -> nginx` подтверждена;
+    - при возврате `worker-01` автоматического rebalance не произошло, что соответствует штатному поведению Docker Swarm;
+    - принудительный `docker service update --force web` переразложил задачи и вернул одну из реплик на `kp-worker-01`;
+    - в `infra/.gitignore` добавлены локальные артефакты `terraform/terraform.tfvars` и `scripts/terraform.tfstate`, чтобы не тянуть их в Git.

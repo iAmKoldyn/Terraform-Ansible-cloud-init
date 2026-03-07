@@ -2,7 +2,8 @@ param(
   [string]$AnsibleDir = "../ansible",
   [string]$Inventory = "inventory/hosts.ini",
   [string]$Playbook = "playbooks/site.yml",
-  [switch]$DisableHostKeyChecking = $true
+  [switch]$DisableHostKeyChecking = $true,
+  [switch]$RefreshKnownHosts = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -26,6 +27,13 @@ if (-not [System.IO.Path]::IsPathRooted($AnsibleDir)) {
 }
 
 $ansibleDirResolved = Resolve-Path $AnsibleDir
+$inventoryPath = if ([System.IO.Path]::IsPathRooted($Inventory)) { $Inventory } else { Join-Path $ansibleDirResolved.Path $Inventory }
+
+if ($RefreshKnownHosts) {
+  $refreshScript = Join-Path $scriptDir "refresh-known-hosts.ps1"
+  & $refreshScript -Inventory $inventoryPath
+}
+
 $ansibleDirWsl = To-WslPath $ansibleDirResolved.Path
 $ansibleCfgWsl = To-WslPath (Join-Path $ansibleDirResolved.Path "ansible.cfg")
 
