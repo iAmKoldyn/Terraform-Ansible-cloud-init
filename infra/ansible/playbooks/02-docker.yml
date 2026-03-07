@@ -2,7 +2,37 @@
 - name: Install Docker engine
   hosts: all
   become: true
+  serial: 1
   tasks:
+    - name: Disable apt background services on lab nodes
+      ansible.builtin.systemd:
+        name: "{{ item }}"
+        enabled: false
+        state: stopped
+        masked: true
+      loop:
+        - apt-daily.service
+        - apt-daily-upgrade.service
+        - apt-daily.timer
+        - apt-daily-upgrade.timer
+        - unattended-upgrades.service
+      ignore_errors: true
+
+    - name: Wait for apt and unattended-upgrades to release dpkg locks
+      ansible.builtin.shell: >-
+        ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 &&
+        ! fuser /var/lib/apt/lists/lock >/dev/null 2>&1 &&
+        ! fuser /var/cache/apt/archives/lock >/dev/null 2>&1 &&
+        ! pgrep -x unattended-upgr >/dev/null 2>&1 &&
+        ! pgrep -x apt >/dev/null 2>&1 &&
+        ! pgrep -x apt-get >/dev/null 2>&1 &&
+        ! pgrep -x dpkg >/dev/null 2>&1
+      register: apt_lock_check
+      retries: 60
+      delay: 5
+      until: apt_lock_check.rc == 0
+      changed_when: false
+
     - name: Remove conflicting Docker CE packages
       ansible.builtin.apt:
         name:
@@ -14,6 +44,7 @@
         state: absent
         purge: true
         autoremove: true
+        lock_timeout: 600
       ignore_errors: true
 
     - name: Refresh apt cache and install docker package
@@ -23,6 +54,8 @@
           - python3-pip
         state: present
         update_cache: true
+        update_cache_retries: 10
+        lock_timeout: 600
 
     - name: Ensure docker service is enabled and started
       ansible.builtin.service:

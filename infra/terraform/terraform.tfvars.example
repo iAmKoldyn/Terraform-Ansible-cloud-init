@@ -11,7 +11,17 @@ lb_ip_start           = 31
 
 hostonly_guest_interface = "enp0s3"
 nat_guest_interface      = "enp0s8"
+bootstrap_revision       = "v6"
 
 managers_count = 3
 workers_count  = 2
 lbs_count      = 2
+
+manager_cpus      = 2
+manager_memory_mb = 2048
+
+worker_cpus       = 2
+worker_memory_mb  = 1536
+
+lb_cpus           = 1
+lb_memory_mb      = 1024

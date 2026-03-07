@@ -100,6 +100,12 @@ cd ..\scripts
 ```
 
 Inventory будет создан в `infra/ansible/inventory/hosts.ini`.
+Скрипт по умолчанию только генерирует inventory.
+Если нужно сразу обновить `known_hosts`, используйте:
+
+```powershell
+.\tf-output-to-inventory.ps1 -RefreshKnownHosts
+```
 
 ## 6) Запустить Ansible из WSL
 
@@ -117,6 +123,8 @@ cd /mnt/c/Users/YOUR_WINDOWS_USER/Desktop/Kwork_labs/KP/infra/ansible
 ANSIBLE_CONFIG=$PWD/ansible.cfg ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook -i inventory/hosts.ini playbooks/site.yml
 ```
 
+`run-ansible-from-wsl.ps1` перед запуском playbook синхронизирует Windows `known_hosts`, чтобы после пересоздания VM не требовался ручной `ssh-keygen -R`.
+
 ## 7) Проверка
 
 На manager-01:
@@ -132,6 +140,14 @@ docker service create --name web --replicas 3 -p 80:80 nginx
 ```
 
 Откройте `http://192.168.56.10` (VIP) с хоста.
+
+Примечания:
+- если backend-сервис на `:80` еще не развернут, VIP может возвращать `503` от HAProxy — это означает, что входной слой жив, но публикуемого приложения за ним пока нет;
+- если worker-нода вернулась после отказа, Swarm не обязан автоматически переразложить задачи обратно; для повторного распределения используйте:
+
+```bash
+docker service update --force web
+```
 
 ## 8) Операционные команды (runbook)
 
@@ -297,4 +313,31 @@ sudo ssh-keygen -A
 sudo systemctl restart ssh
 sudo systemctl status ssh --no-pager
 ls -l /etc/ssh/ssh_host_*
+```
+
+### Загрузка зависает на `A start job is running for Wait for Network to be Configured`
+- Симптом: сразу после `terraform apply` часть нод долго не пингуется или SSH на них то недоступен, то закрывается до авторизации.
+- Причина: systemd ждёт `network-online`, а VirtualBox-гость ещё не завершил настройку одного из интерфейсов.
+- Исправление уже внесено в проект:
+  - в `infra/cloud-init/network-config.tpl` оба интерфейса помечены как `optional: true`;
+  - в `infra/cloud-init/user-data.tpl` та же логика дублируется в netplan и отключаются `systemd-networkd-wait-online.service` / `NetworkManager-wait-online.service`.
+- После этой правки ноды нужно пересоздать, чтобы новый `seed.iso` попал в клоны:
+
+```powershell
+cd infra/terraform
+terraform apply
+cd ..\scripts
+.\tf-output-to-inventory.ps1
+```
+
+- После `terraform apply` дайте гостям 1-3 минуты на первый boot (`cloud-init`, `network-online`, генерация host keys`) и только потом запускайте Ansible.
+- Если используете стандартный workflow `terraform apply -> tf-output-to-inventory.ps1 -> run-ansible-from-wsl.ps1`, ручная очистка `known_hosts` больше не нужна: она выполняется автоматически.
+- Перед запуском Ansible проверьте доступность SSH по всем IP:
+
+```powershell
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -i C:\Users\<USER>\.ssh\id_ed25519 naurlox@192.168.56.11 hostname
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -i C:\Users\<USER>\.ssh\id_ed25519 naurlox@192.168.56.12 hostname
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -i C:\Users\<USER>\.ssh\id_ed25519 naurlox@192.168.56.21 hostname
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -i C:\Users\<USER>\.ssh\id_ed25519 naurlox@192.168.56.22 hostname
+ssh -o BatchMode=yes -o StrictHostKeyChecking=no -o UserKnownHostsFile=NUL -i C:\Users\<USER>\.ssh\id_ed25519 naurlox@192.168.56.31 hostname
 ```
