@@ -31,6 +31,16 @@
   hosts: managers
   become: true
   tasks:
+    - name: Ensure primary manager produced a manager join token
+      ansible.builtin.assert:
+        that:
+          - hostvars[groups['managers'][0]].swarm_manager_token is defined
+          - hostvars[groups['managers'][0]].swarm_manager_token | length > 0
+        fail_msg: >-
+          Primary manager {{ groups['managers'][0] }} did not expose a swarm manager token.
+          Check Docker install and swarm init on that node before joining additional managers.
+      run_once: true
+
     - name: Check local swarm state
       ansible.builtin.command: 'docker info --format {{ "{{.Swarm.LocalNodeState}}" }}'
       register: swarm_state
@@ -49,6 +59,16 @@
   hosts: workers
   become: true
   tasks:
+    - name: Ensure primary manager produced a worker join token
+      ansible.builtin.assert:
+        that:
+          - hostvars[groups['managers'][0]].swarm_worker_token is defined
+          - hostvars[groups['managers'][0]].swarm_worker_token | length > 0
+        fail_msg: >-
+          Primary manager {{ groups['managers'][0] }} did not expose a swarm worker token.
+          Check Docker install and swarm init on that node before joining workers.
+      run_once: true
+
     - name: Check local swarm state
       ansible.builtin.command: 'docker info --format {{ "{{.Swarm.LocalNodeState}}" }}'
       register: swarm_state
