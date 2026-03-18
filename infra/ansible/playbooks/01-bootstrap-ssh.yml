@@ -3,10 +3,19 @@
   hosts: all
   become: true
   tasks:
+    - name: Wait for cloud-init to finish first boot
+      ansible.builtin.shell: |
+        if command -v cloud-init >/dev/null 2>&1; then
+          cloud-init status --wait
+        fi
+      args:
+        executable: /bin/bash
+      changed_when: false
+
     - name: Ensure naurlox user exists
       ansible.builtin.user:
         name: naurlox
-        groups: sudo,docker
+        groups: sudo
         append: true
         shell: /bin/bash
 
