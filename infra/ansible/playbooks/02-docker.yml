@@ -1,6 +1,6 @@
 ---
 - name: Install Docker engine
-  hosts: all
+  hosts: managers:workers
   become: true
   serial: 1
   tasks:
@@ -18,6 +18,45 @@
         - unattended-upgrades.service
       ignore_errors: true
 
+    - name: Kill stale ansible apt lock holders from aborted runs
+      ansible.builtin.shell: |
+        set -eu
+        locks="/var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/cache/apt/archives/lock"
+        pids="$(fuser $locks 2>/dev/null | tr ' ' '\n' | grep -E '^[0-9]+$' | sort -u || true)"
+        cleaned=0
+
+        for pid in $pids; do
+          etimes="$(ps -o etimes= -p "$pid" | tr -d ' ' || echo 0)"
+          args="$(ps -o args= -p "$pid" || true)"
+          ppid="$(ps -o ppid= -p "$pid" | tr -d ' ' || echo '')"
+          parent_args=""
+          grandparent_args=""
+
+          if [ -n "$ppid" ]; then
+            parent_args="$(ps -o args= -p "$ppid" || true)"
+            gppid="$(ps -o ppid= -p "$ppid" | tr -d ' ' || echo '')"
+            if [ -n "$gppid" ]; then
+              grandparent_args="$(ps -o args= -p "$gppid" || true)"
+            fi
+          fi
+
+          if [ "$etimes" -ge 300 ] &&
+             printf '%s\n%s\n%s\n' "$args" "$parent_args" "$grandparent_args" | grep -Eq 'BECOME-SUCCESS|/usr/bin/python3'; then
+            kill -TERM "$pid" 2>/dev/null || true
+            sleep 2
+            if kill -0 "$pid" 2>/dev/null; then
+              kill -KILL "$pid" 2>/dev/null || true
+            fi
+            cleaned=1
+          fi
+        done
+
+        echo "$cleaned"
+      args:
+        executable: /bin/bash
+      register: stale_apt_lock_cleanup
+      changed_when: stale_apt_lock_cleanup.stdout | trim == "1"
+
     - name: Wait for apt and unattended-upgrades to release dpkg locks
       ansible.builtin.shell: >-
         ! fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 &&
@@ -33,6 +72,12 @@
       until: apt_lock_check.rc == 0
       changed_when: false
 
+    - name: Repair interrupted dpkg state
+      ansible.builtin.command: dpkg --configure -a
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+      changed_when: false
+
     - name: Remove conflicting Docker CE packages
       ansible.builtin.apt:
         name:
@@ -43,7 +88,7 @@
           - docker-compose-plugin
         state: absent
         purge: true
-        autoremove: true
+        force_apt_get: true
         lock_timeout: 600
       ignore_errors: true
 
@@ -53,6 +98,7 @@
           - docker.io
           - python3-pip
         state: present
+        force_apt_get: true
         update_cache: true
         update_cache_retries: 10
         lock_timeout: 600

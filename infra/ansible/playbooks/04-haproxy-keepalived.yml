@@ -5,6 +5,14 @@
   vars_files:
     - "{{ playbook_dir }}/../group_vars/all.yml"
   tasks:
+    - name: Ensure at least one worker exists for HTTP backend
+      ansible.builtin.assert:
+        that:
+          - groups['workers'] | length > 0
+        fail_msg: >-
+          HAProxy HTTP backend is configured to route only to worker nodes.
+          Add at least one worker to the inventory before applying this playbook.
+
     - name: Install haproxy and keepalived
       ansible.builtin.apt:
         name:

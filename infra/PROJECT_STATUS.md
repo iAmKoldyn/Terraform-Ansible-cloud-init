@@ -1,6 +1,6 @@
 # Статус проекта
 
-Последнее обновление: 2026-02-24
+Последнее обновление: 2026-03-18
 
 ## Сделано
 - Создан каркас инфраструктуры `Terraform + Ansible + cloud-init` в каталоге `infra/`.
@@ -22,14 +22,41 @@
   - проверено, что вход под `deploy` больше не работает
   - принудительно включен `PasswordAuthentication no` для SSH
 - Изменен шаблон cloud-init, чтобы `50-cloud-init.conf` не включал парольный вход обратно.
+- Архитектурно зафиксирован рекомендуемый профиль под ТЗ:
+  - `3 manager + 2 worker + 2 lb`
+  - это минимально корректная HA-топология для Docker Swarm в данном проекте
+- Сетевая модель проекта документирована:
+  - `Adapter 1 = Host-Only` для SSH, VIP, межнодового трафика и backend-маршрутизации;
+  - `Adapter 2 = NAT` для исходящего доступа в интернет;
+  - в `terraform.tfvars` задается имя host-only адаптера хоста и имена гостевых интерфейсов, а сам NAT включается в `new-vm.ps1`.
+- Архитектура приведена ближе к production-практике:
+  - Docker устанавливается только на `managers` и `workers`, без LB;
+  - HAProxy отправляет HTTP только на `workers`;
+  - manager-ноды остаются backend только для `:2377` (Swarm control plane).
+- В документацию добавлены рекомендации по `docker stack` для прикладных сервисов и по переносу `keepalived_auth_pass` в `Ansible Vault`.
+- Усилен preflight перед пакетными операциями:
+  - `01-bootstrap-ssh.yml` теперь ждет завершения `cloud-init`;
+  - пользователь `naurlox` больше не зависит от существования `docker` group до установки Docker;
+  - `02-docker.yml` чистит сиротские `ansible apt` lock holder'ы и восстанавливает `dpkg` state.
+- В `README.md` добавлен единый готовый сценарий демонстрации для защиты:
+  - деплой наблюдаемого сервиса `traefik/whoami`;
+  - проверка репликации;
+  - проверка доступа через VIP;
+  - отказ worker;
+  - отказ одного manager при сохранении quorum;
+  - failover active LB.
 
 ## Следующие шаги
-- Для полного соответствия заданию перейти со smoke-профиля (`1 manager + 1 worker + 1 lb`) на целевой профиль (`3 managers + 2 workers + 2 lb`).
+- Поднять и зафиксировать финальный стенд именно в целевом профиле `3 managers + 2 workers + 2 lb`.
 - Провести и зафиксировать failover-тесты:
   - выключение одного manager (кворум должен сохраниться),
   - выключение одного worker (сервис доступен),
   - выключение активного LB (VIP переходит на backup LB).
 - Пересобрать финальный snapshot golden VM после полной очистки (`cloud-init`, `machine-id`, `ssh_host_*`), чтобы зафиксировать эталонный образ.
+- При необходимости ужесточить security-профиль:
+  - вынести `keepalived_auth_pass` из `group_vars/all.yml` в `Ansible Vault`;
+  - при дальнейшем росте проекта подумать о выделенных ingress-нодах вместо обычных workers.
+- Добавить в репозиторий один или несколько `docker stack` манифестов для собственных сервисов.
 - По желанию: вынести провижининг VM в отдельный модуль `infra/terraform-vsphere` для миграции на VMware, оставив Ansible-слой без изменений.
 
 ## Журнал изменений
@@ -44,6 +71,19 @@
     - `/etc/ssh/sshd_config.d/99-hardening.conf`
   - Обезличены персональные пути к SSH-ключу в документации и примерах (`YOUR_WINDOWS_USER`).
   - Добавлен roadmap-пункт по миграции инфраструктурного слоя на VMware.
+- 2026-03-18:
+  - README дополнен явным описанием сетевой схемы `Host-Only + NAT` и назначением каждого интерфейса;
+  - README дополнен рекомендацией по целевому профилю `3 manager + 2 worker + 2 lb` как минимальной HA-конфигурации под ТЗ;
+  - README дополнен разделом по `docker stack deploy` для прикладных сервисов;
+  - README дополнен рекомендацией по использованию `Ansible Vault` для `keepalived_auth_pass` и других секретов;
+  - `infra/ansible/playbooks/02-docker.yml` переведен с `hosts: all` на `hosts: managers:workers`, чтобы не ставить Docker на LB-ноды;
+  - `infra/ansible/templates/haproxy.cfg.j2` переведен на HTTP backend только по worker-нодам;
+  - `infra/ansible/playbooks/04-haproxy-keepalived.yml` дополнен явной проверкой, что в inventory есть хотя бы один worker;
+  - README дополнен рекомендацией держать golden VM без установленного Docker и без Docker APT repo;
+  - `infra/ansible/playbooks/01-bootstrap-ssh.yml` дополнен ожиданием `cloud-init status --wait` до остальных задач;
+  - `infra/ansible/playbooks/01-bootstrap-ssh.yml` больше не предполагает наличие `docker` group до установки Docker;
+  - `infra/ansible/playbooks/02-docker.yml` усилен cleanup-логикой для зависших `ansible apt` процессов и `dpkg --configure -a`.
+  - README дополнен единым пошаговым сценарием демонстрации отказоустойчивости, балансировки и quorum.
 
 ## Примечания
 - Этот файл является единым источником правды по проекту:
