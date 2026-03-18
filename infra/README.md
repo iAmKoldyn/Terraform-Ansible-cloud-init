@@ -22,6 +22,9 @@
 
 ```bash
 sudo rm -f /home/naurlox/.ssh/authorized_keys
+sudo apt-get purge -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin docker.io docker-doc docker-compose podman-docker || true
+sudo rm -f /etc/apt/sources.list.d/docker.list
+sudo apt-get autoremove -y
 sudo rm -f /etc/ssh/ssh_host_*key*
 sudo truncate -s 0 /etc/machine-id
 sudo rm -f /var/lib/dbus/machine-id
@@ -33,6 +36,11 @@ sudo poweroff
 После этого создайте или обновите snapshot `GOLDEN-CLEAN`.
 
 Важно: не удаляйте доступ, пока не проверите cloud-init bootstrap хотя бы на одном клоне.
+
+Практика:
+- golden VM лучше держать без установленного Docker и без Docker APT repo;
+- Docker должен приходить из Ansible, иначе на первом прогоне playbook тратит время на удаление `docker-ce/containerd.io` и может упереться в `dpkg` lock на незавершенном или прерванном `apt`;
+- preflight в `01-bootstrap-ssh.yml` теперь ждет завершения `cloud-init`, а `02-docker.yml` дополнительно лечит зависшие `apt`-процессы после прерванных прогонов.
 
 ## 2) Требования
 
@@ -78,7 +86,46 @@ hostonly_guest_interface = "enp0s3"
 nat_guest_interface      = "enp0s8"
 ```
 
+Рекомендуемый профиль для задания:
+
+```hcl
+managers_count = 3
+workers_count  = 2
+lbs_count      = 2
+```
+
+Почему именно так:
+- `3 manager` — минимально достаточный состав для кворума Raft; кластер переживает отказ одного manager;
+- `2 worker` — достаточно для репликации прикладных сервисов и демонстрации failover;
+- `2 lb` — убирают single point of failure на входном слое и позволяют VIP переключаться между LB.
+
 Важно: сетевые переменные в Terraform теперь обязательны (без `terraform.tfvars` или `-var` запуск `plan/apply` завершится ошибкой).
+
+## 3.1) Сетевая схема
+
+В проекте у каждой VM два сетевых адаптера:
+
+1. `Adapter 1 = Host-Only`
+   - на стороне хоста VirtualBox задается через `host_only_adapter`;
+   - внутри гостевой Ubuntu это интерфейс `hostonly_guest_interface` (по умолчанию `enp0s3`);
+   - получает статический IP из `cluster_cidr`;
+   - используется для:
+     - SSH с хоста;
+     - межнодового трафика Swarm;
+     - VIP `192.168.56.10`;
+     - backend-трафика HAProxy.
+
+2. `Adapter 2 = NAT`
+   - на стороне VirtualBox включается автоматически, отдельное имя адаптера в `terraform.tfvars` не требуется;
+   - внутри гостевой Ubuntu это интерфейс `nat_guest_interface` (по умолчанию `enp0s8`);
+   - получает адрес по DHCP;
+   - используется как исходящий канал в интернет для `apt`, скачивания пакетов и bootstrap.
+
+Важно:
+- `host_only_adapter` в `terraform.tfvars` не описывает всю сетевую схему целиком, а только имя host-only адаптера на Windows-хосте;
+- NAT у тебя уже есть и настраивается в `infra/scripts/new-vm.ps1`;
+- в терминах задания это изолированный стенд с отдельным внутренним сегментом для кластера и отдельным egress-каналом наружу;
+- если нужен строго air-gapped профиль без выхода в интернет, NAT придется отключать и готовить локальные зеркала/образы заранее.
 
 ## 4) Развернуть VM (Terraform)
 
@@ -148,6 +195,268 @@ docker service create --name web --replicas 3 -p 80:80 nginx
 ```bash
 docker service update --force web
 ```
+
+- текущий `infra/ansible/templates/haproxy.cfg.j2` маршрутизирует HTTP только на workers; это ближе к production-практике и не смешивает прикладной трафик с manager control plane;
+- manager backend в HAProxy остается отдельным и используется только для `:2377` (join/control plane);
+- если в кластере нет ни одного worker, playbook `04-haproxy-keepalived.yml` теперь завершится явной ошибкой, а не создаст пустой HTTP backend.
+
+## 7.1) Docker Stack для прикладных сервисов
+
+Для ручного smoke-теста достаточно `docker service create`, но для своих приложений лучше использовать `docker stack deploy` и хранить стек в Git.
+
+Минимальный пример:
+
+```yaml
+version: "3.8"
+
+services:
+  web:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    deploy:
+      replicas: 3
+      placement:
+        constraints:
+          - node.role == worker
+      restart_policy:
+        condition: any
+    networks:
+      - app_net
+
+networks:
+  app_net:
+    driver: overlay
+    attachable: true
+```
+
+Команды:
+
+```bash
+docker stack deploy -c stack.yml app
+docker stack services app
+docker stack ps app
+docker service scale app_web=5
+docker stack rm app
+```
+
+Практика:
+- выполнять `docker stack deploy` нужно с manager-ноды;
+- для прикладных сервисов лучше задавать `placement.constraints`, чтобы не размещать нагрузку на managers без необходимости;
+- при нескольких сервисах в одном стеке удобнее версионировать их вместе, чем управлять каждым через отдельные `docker service create/update`.
+- текущая конфигурация HAProxy уже соответствует этому подходу: HTTP трафик идет только на worker-ноды.
+
+## 7.2) Секреты и Ansible Vault
+
+Сейчас переменная `keepalived_auth_pass` хранится открытым текстом в `infra/ansible/group_vars/all.yml`. Для лабораторного стенда это допустимо, но для более строгой практики лучше вынести секреты в `Ansible Vault`.
+
+Минимальный путь:
+
+```bash
+ansible-vault encrypt_string 'SWarmPass123' --name 'keepalived_auth_pass'
+```
+
+Дальше:
+- заменить открытое значение в `group_vars/all.yml` на зашифрованный блок;
+- запускать playbook с `--ask-vault-pass` или `--vault-password-file`;
+- тем же способом хранить пароли приложений, токены API и другие секреты для будущих `docker stack` сервисов.
+
+## 7.3) Готовый Сценарий Демонстрации
+
+Ниже один готовый сценарий для защиты. Он показывает:
+- что кластер поднят;
+- что сервис реплицирован;
+- что доступ через VIP работает;
+- что отказ worker не ломает сервис;
+- что отказ одного manager не ломает quorum;
+- что отказ active LB не ломает входной доступ.
+
+Для наглядной балансировки лучше использовать не `nginx`, а `traefik/whoami`, потому что он возвращает hostname контейнера в ответе.
+
+### Шаг 1. Проверка кластера
+
+На `manager-01`:
+
+```bash
+sudo docker node ls
+sudo docker service ls
+```
+
+Что показать:
+- `3 manager`, из них один `Leader`, остальные `Reachable`;
+- `2 worker` в статусе `Ready/Active`.
+
+### Шаг 2. Развернуть демонстрационный сервис
+
+Если `web` уже есть, сначала удалить:
+
+```bash
+sudo docker service rm web || true
+```
+
+Потом создать сервис:
+
+```bash
+sudo docker service create \
+  --name web \
+  --replicas 3 \
+  --constraint 'node.role==worker' \
+  -p 80:80 \
+  traefik/whoami
+```
+
+Проверка:
+
+```bash
+sudo docker service ls
+sudo docker service ps web
+```
+
+Что показать:
+- `web` в статусе `3/3`;
+- реплики размещены на worker-нодах.
+
+### Шаг 3. Показать доступ через VIP и балансировку
+
+С Windows-хоста:
+
+```powershell
+curl http://192.168.56.10
+```
+
+Для наглядности несколько запросов подряд:
+
+```powershell
+1..10 | ForEach-Object { curl http://192.168.56.10 }
+```
+
+Что показать:
+- ответы приходят через `VIP 192.168.56.10`;
+- в выводе `whoami` меняется `Hostname`, значит HAProxy и Swarm действительно распределяют запросы между репликами.
+
+### Шаг 4. Проверка отказа worker без потери сервиса
+
+На `manager-01`:
+
+```bash
+sudo docker node update --availability drain kp-worker-01
+sudo docker service ps web
+```
+
+С Windows-хоста:
+
+```powershell
+1..10 | ForEach-Object { curl http://192.168.56.10 }
+```
+
+Что показать:
+- `kp-worker-01` выведен из размещения задач;
+- Swarm переразмещает реплики на оставшиеся worker-ноды;
+- сервис по `VIP` продолжает отвечать.
+
+Вернуть worker обратно:
+
+```bash
+sudo docker node update --availability active kp-worker-01
+sudo docker service update --force web
+sudo docker service ps web
+```
+
+### Шаг 5. Проверка quorum: отказ одного manager
+
+С Windows-хоста:
+
+```powershell
+VBoxManage controlvm kp-manager-02 poweroff
+```
+
+На живом manager:
+
+```bash
+sudo docker node ls
+sudo docker service ls
+sudo docker service ps web
+```
+
+С Windows-хоста:
+
+```powershell
+curl -I http://192.168.56.10
+```
+
+Что показать:
+- при `3 manager` кластер переживает отказ одного manager;
+- команды Swarm продолжают работать;
+- сервис остается доступен.
+
+Вернуть manager:
+
+```powershell
+VBoxManage startvm kp-manager-02 --type headless
+```
+
+### Шаг 6. Проверка failover LB
+
+Сначала определить, на каком LB сейчас VIP:
+
+```bash
+ssh naurlox@192.168.56.31 "ip a | grep 192.168.56.10 || true"
+ssh naurlox@192.168.56.32 "ip a | grep 192.168.56.10 || true"
+```
+
+Выключить active LB через Windows:
+
+```powershell
+VBoxManage controlvm kp-lb-01 poweroff
+```
+
+или, если VIP был на `kp-lb-02`:
+
+```powershell
+VBoxManage controlvm kp-lb-02 poweroff
+```
+
+С Windows-хоста:
+
+```powershell
+curl -I http://192.168.56.10
+```
+
+Что показать:
+- VIP переехал на второй LB;
+- клиент продолжает ходить на тот же `192.168.56.10`;
+- сервис остается доступен.
+
+Вернуть LB:
+
+```powershell
+VBoxManage startvm kp-lb-01 --type headless
+```
+
+или:
+
+```powershell
+VBoxManage startvm kp-lb-02 --type headless
+```
+
+### Шаг 7. Финальная очистка после демонстрации
+
+Если временный сервис больше не нужен:
+
+```bash
+sudo docker service rm web
+```
+
+Если нужен повторный прогон LB-конфигов после жестких выключений:
+
+```powershell
+cd infra\scripts
+.\run-ansible-from-wsl.ps1 -Playbook playbooks/04-haproxy-keepalived.yml
+```
+
+Ограничение сценария:
+- не выключайте одновременно два manager при конфигурации `3 manager`, иначе quorum будет потерян;
+- если хотите показать именно балансировку, а не только отказоустойчивость, используйте `whoami`, а не обычный `nginx`.
 
 ## 8) Операционные команды (runbook)
 
