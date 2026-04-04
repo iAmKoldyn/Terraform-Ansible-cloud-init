@@ -1,6 +1,7 @@
 param(
   [string]$Inventory = "../ansible/inventory/hosts.ini",
   [string]$KnownHostsFile = "",
+  [string]$SshUser = "",
   [int]$Port = 22,
   [int]$MaxAttempts = 60,
   [int]$DelaySeconds = 5,
@@ -46,6 +47,29 @@ function Get-InventoryHosts {
   }
 
   return $hosts | Sort-Object -Property Address -Unique
+}
+
+function Get-InventoryVar {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  foreach ($line in (Get-Content -LiteralPath $Path)) {
+    $trimmed = $line.Trim()
+    if (-not $trimmed -or $trimmed.StartsWith("#") -or $trimmed.StartsWith("[")) {
+      continue
+    }
+
+    if ($trimmed -like "$Name=*") {
+      return $trimmed.Substring($Name.Length + 1)
+    }
+  }
+
+  return $null
 }
 
 function Ensure-KnownHostsFile {
@@ -129,6 +153,32 @@ function Get-HostKeyLines {
   }
 
   return @($output | Where-Object { $_ -and -not $_.StartsWith("#") })
+}
+
+function Confirm-SshAccessAndPrimeKnownHosts {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Address,
+
+    [Parameter(Mandatory = $true)]
+    [string]$User,
+
+    [Parameter(Mandatory = $true)]
+    [string]$KnownHostsPath,
+
+    [Parameter(Mandatory = $true)]
+    [int]$TimeoutSeconds
+  )
+
+  $target = "$User@$Address"
+  & ssh `
+    -o "BatchMode=yes" `
+    -o "StrictHostKeyChecking=accept-new" `
+    -o "UserKnownHostsFile=$KnownHostsPath" `
+    -o "ConnectTimeout=$TimeoutSeconds" `
+    $target "exit" *> $null
+
+  return ($LASTEXITCODE -eq 0)
 }
 
 function Get-HostKeyLinesWithRetry {
@@ -235,6 +285,14 @@ if ([string]::IsNullOrWhiteSpace($KnownHostsFile)) {
 $inventoryResolved = (Resolve-Path -LiteralPath $Inventory).Path
 $knownHostsResolved = [System.IO.Path]::GetFullPath($KnownHostsFile)
 
+if ([string]::IsNullOrWhiteSpace($SshUser)) {
+  $SshUser = Get-InventoryVar -Path $inventoryResolved -Name "ansible_user"
+}
+
+if ([string]::IsNullOrWhiteSpace($SshUser)) {
+  throw "Could not determine SSH user. Pass -SshUser or define ansible_user in inventory."
+}
+
 Get-Command ssh-keygen -ErrorAction Stop | Out-Null
 Get-Command ssh-keyscan -ErrorAction Stop | Out-Null
 
@@ -266,6 +324,11 @@ foreach ($node in $hosts) {
         $nodeReady = $true
         continue
       } catch {
+        if (Confirm-SshAccessAndPrimeKnownHosts -Address $node.Address -User $SshUser -KnownHostsPath $knownHostsResolved -TimeoutSeconds $ConnectTimeoutSeconds) {
+          $refreshed += $node.Address
+          $nodeReady = $true
+          continue
+        }
       }
     }
 

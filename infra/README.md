@@ -261,7 +261,30 @@ ansible-vault encrypt_string 'SWarmPass123' --name 'keepalived_auth_pass'
 - запускать playbook с `--ask-vault-pass` или `--vault-password-file`;
 - тем же способом хранить пароли приложений, токены API и другие секреты для будущих `docker stack` сервисов.
 
-## 7.3) Готовый Сценарий Демонстрации
+## 7.3) HAProxy Stats Page
+
+В конфигурации LB включена отдельная read-only stats page HAProxy.
+
+Доступ:
+
+```text
+http://192.168.56.31:8404/stats
+http://192.168.56.32:8404/stats
+```
+
+Текущие учетные данные по умолчанию:
+
+```text
+admin / admin
+```
+
+Что важно:
+- это отдельный `listen haproxy_stats`, а не приложение за обычным HTTP frontend;
+- страница слушает только `ansible_host` LB-ноды;
+- runtime admin-команды не включены, страница остается read-only;
+- для реального окружения пароль нужно заменить и вынести в `Ansible Vault`.
+
+## 7.4) Готовый Сценарий Демонстрации
 
 Ниже один готовый сценарий для защиты. Он показывает:
 - что кластер поднят;

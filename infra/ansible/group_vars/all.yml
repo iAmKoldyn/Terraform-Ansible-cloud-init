@@ -10,3 +10,8 @@ vip_prefix: 24
 vip_interface: "{{ hostonly_guest_interface }}"
 keepalived_router_id: 51
 keepalived_auth_pass: SWarmPass123
+
+haproxy_stats_port: 8404
+haproxy_stats_uri: /stats
+haproxy_stats_user: admin
+haproxy_stats_password: admin

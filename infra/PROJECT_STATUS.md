@@ -1,6 +1,6 @@
 # Статус проекта
 
-Последнее обновление: 2026-03-18
+Последнее обновление: 2026-04-04
 
 ## Сделано
 - Создан каркас инфраструктуры `Terraform + Ansible + cloud-init` в каталоге `infra/`.
@@ -45,6 +45,11 @@
   - отказ worker;
   - отказ одного manager при сохранении quorum;
   - failover active LB.
+- В HAProxy добавлена read-only stats page:
+  - отдельный `listen haproxy_stats`;
+  - bind только на `ansible_host` LB-ноды, а не на все интерфейсы;
+  - доступ по basic auth;
+  - runtime admin-команды не включены, страница остается read-only.
 
 ## Следующие шаги
 - Поднять и зафиксировать финальный стенд именно в целевом профиле `3 managers + 2 workers + 2 lb`.
@@ -84,6 +89,21 @@
   - `infra/ansible/playbooks/01-bootstrap-ssh.yml` больше не предполагает наличие `docker` group до установки Docker;
   - `infra/ansible/playbooks/02-docker.yml` усилен cleanup-логикой для зависших `ansible apt` процессов и `dpkg --configure -a`.
   - README дополнен единым пошаговым сценарием демонстрации отказоустойчивости, балансировки и quorum.
+- 2026-04-04:
+  - в `infra/ansible/group_vars/all.yml` добавлены параметры stats page HAProxy (`haproxy_stats_port`, `haproxy_stats_uri`, `haproxy_stats_user`, `haproxy_stats_password`);
+  - в `infra/ansible/templates/haproxy.cfg.j2` добавлен отдельный read-only `listen haproxy_stats`;
+  - stats page слушает только `ansible_host` LB-ноды и не включает runtime admin-функции.
+  - в `infra/scripts/refresh-known-hosts.ps1` добавлен fallback через обычный SSH-сеанс с `StrictHostKeyChecking=accept-new`, если `ssh-keyscan` не успевает прогреть `known_hosts`, хотя сама нода уже доступна по SSH;
+  - подтвержден успешный полный прогон `infra/scripts/run-ansible-from-wsl.ps1` на профиле `3 manager + 2 worker + 2 lb`;
+  - подтверждено фактическое состояние после прогона:
+    - `3 manager`, из них `kp-manager-01 = Leader`, `kp-manager-02/03 = Reachable`;
+    - `2 worker` в статусе `Ready/Active`;
+    - VIP `192.168.56.10` поднят на `kp-lb-01`;
+    - HAProxy HTTP backend содержит только `kp-worker-01` и `kp-worker-02`;
+    - stats page доступна на `http://<lb-ip>:8404/stats` с basic auth (`admin/admin` в текущем lab-профиле);
+  - подтвержден failover LB:
+    - после выключения `kp-lb-01` VIP продолжает обслуживаться по тому же адресу `192.168.56.10`;
+    - VIP переезжает на `kp-lb-02`, клиентский адрес не меняется.
 
 ## Примечания
 - Этот файл является единым источником правды по проекту:
