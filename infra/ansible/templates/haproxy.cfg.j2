@@ -32,3 +32,14 @@ backend swarm_managers_nodes
 {% for host in groups['managers'] %}
   server {{ host }} {{ hostvars[host].ansible_host }}:2377 check
 {% endfor %}
+
+listen haproxy_stats
+  bind {{ ansible_host }}:{{ haproxy_stats_port }}
+  mode http
+  stats enable
+  stats uri {{ haproxy_stats_uri }}
+  stats refresh 10s
+  stats show-node
+  stats show-legends
+  stats realm HAProxy\ Statistics
+  stats auth {{ haproxy_stats_user }}:{{ haproxy_stats_password }}
