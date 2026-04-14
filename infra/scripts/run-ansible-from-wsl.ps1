@@ -3,7 +3,8 @@ param(
   [string]$Inventory = "inventory/hosts.ini",
   [string]$Playbook = "playbooks/site.yml",
   [switch]$DisableHostKeyChecking = $true,
-  [switch]$RefreshKnownHosts = $true
+  [switch]$RefreshKnownHosts = $true,
+  [switch]$AutoRebalanceServices = $true
 )
 
 $ErrorActionPreference = "Stop"
@@ -46,4 +47,13 @@ $cmd = "cd '$ansibleDirWsl' && $envExports ansible-playbook -i '$Inventory' '$Pl
 wsl bash -lc $cmd
 if ($LASTEXITCODE -ne 0) {
   throw "Ansible run failed"
+}
+
+if ($AutoRebalanceServices) {
+  $rebalanceScript = Join-Path $scriptDir "rebalance-swarm-services.ps1"
+  try {
+    & $rebalanceScript -Inventory $inventoryPath
+  } catch {
+    Write-Warning ("Auto-rebalance skipped: " + $_.Exception.Message)
+  }
 }

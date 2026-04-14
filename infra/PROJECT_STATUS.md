@@ -1,6 +1,6 @@
 # Статус проекта
 
-Последнее обновление: 2026-04-04
+Последнее обновление: 2026-04-12
 
 ## Сделано
 - Создан каркас инфраструктуры `Terraform + Ansible + cloud-init` в каталоге `infra/`.
@@ -45,18 +45,54 @@
   - отказ worker;
   - отказ одного manager при сохранении quorum;
   - failover active LB.
+- В `infra/test/README.md` добавлен полный lifecycle-runbook для `pageview`:
+  - `deploy / restart / stop / start / remove`;
+  - отдельные команды для worker failover;
+  - отдельные команды для manager quorum;
+  - отдельные команды для failover LB и проверки сохранения VIP.
 - В HAProxy добавлена read-only stats page:
   - отдельный `listen haproxy_stats`;
   - bind только на `ansible_host` LB-ноды, а не на все интерфейсы;
   - доступ по basic auth;
   - runtime admin-команды не включены, страница остается read-only.
+- Проведена эксплуатационная проверка тестового stack-сервиса `pageview` (`naurlox123/naurlox:pageview-v1`, `replicas=3`, published ports `3000/3001`):
+  - подтверждено распределение запросов routing mesh по трем разным контейнерам по ответам `/api/stats`;
+  - при отказе `kp-worker-01` сервис остался доступен через опубликованный порт `:3000`, а недостающая задача была пересоздана на `kp-worker-02`;
+  - после возврата `kp-worker-01` автоматического rebalance не произошло, все активные задачи остались на `kp-worker-02`, что соответствует штатному поведению Docker Swarm.
+- В проект добавлен автоматизированный post-recovery rebalance для прикладных сервисов:
+  - новый скрипт `infra/scripts/rebalance-swarm-services.ps1`;
+  - `infra/scripts/run-ansible-from-wsl.ps1` после успешного playbook вызывает его автоматически;
+  - rebalance применяется только к сервисам с label `com.kp.auto_rebalance=true`;
+  - логика осознанно сделана через rolling `docker service update --force`, а не через несуществующий в Swarm "нативный rebalance".
+- Тестовый stack `pageview` переведен на новый эксплуатационный профиль:
+  - redeploy выполнен через `docker stack deploy -c ~/docker-stack.yml pageview` с `export PAGE_VIEW_IMAGE=naurlox123/naurlox:pageview-v1`;
+  - в `docker service inspect pageview_page_view_demo` подтвержден label `com.kp.auto_rebalance=true`;
+  - подтверждено текущее ожидаемое распределение `3 replicas` по `2 worker` как `2+1`, а не как равномерное `1+1+1`;
+  - прямые ingress endpoint-ы зафиксированы как `http://<manager-or-worker-ip>:3000|3001`.
+- Проведена фактическая проверка LB failover и HAProxy stats на текущем контуре:
+  - при выключении `kp-lb-01` VIP `192.168.56.10` переехал на `kp-lb-02` за один цикл опроса;
+  - `curl http://192.168.56.10` продолжил отвечать кодом `503`, что в данном тесте означает живой VIP/HAProxy-контур, но отсутствие HTTP backend на `:80`;
+  - по CSV stats подтверждено: `swarm_managers_nodes = UP`, а `swarm_http_nodes = DOWN`, потому что текущий `pageview` опубликован на `:3000/:3001` и не проходит через HAProxy, который сейчас маршрутизирует только `:80`.
+- В HAProxy-шаблон добавлена масштабируемая схема L7-маршрутизации нескольких HTTP-сервисов через один VIP:
+  - новая переменная `haproxy_http_routes` в `infra/ansible/group_vars/all.yml`;
+  - `infra/ansible/templates/haproxy.cfg.j2` теперь поддерживает host-based routing на разные backend-порты worker-нод;
+  - это убирает необходимость заводить отдельный внешний VIP/порт на каждый HTTP-сервис;
+  - в `group_vars/all.yml` оставлен второй шаблонный маршрут `api.local -> :8080`, но он закомментирован до появления реального сервиса, чтобы не плодить заведомо `DOWN` backend в HAProxy stats.
+- Маршрут `pageview` через VIP включен и проверен фактически:
+  - в `haproxy_http_routes` настроен `pageview.local -> backend_port 3000`;
+  - `curl -H "Host: pageview.local" http://192.168.56.10/api/stats` возвращает ответ приложения;
+  - в HAProxy stats отдельный `pageview_backend` находится в статусе `UP`;
+  - базовый `swarm_http_nodes` при этом остается `DOWN`, что ожидаемо без отдельного backend-сервиса на `:80`.
+- Проверен отказ одного follower-manager:
+  - при выключении `kp-manager-02` `kp-manager-01` сохранил роль `Leader`, `kp-manager-03` остался `Reachable`, quorum сохранился;
+  - сервис `pageview` во время отказа manager остался в состоянии `3/3`;
+  - при возврате `kp-manager-02` наблюдалось замедленное восстановление, но после ожидания нода вернулась в `Ready/Reachable`;
+  - текущее фактическое состояние стенда снова `3 manager + 2 worker + 2 lb`.
 
 ## Следующие шаги
-- Поднять и зафиксировать финальный стенд именно в целевом профиле `3 managers + 2 workers + 2 lb`.
-- Провести и зафиксировать failover-тесты:
-  - выключение одного manager (кворум должен сохраниться),
-  - выключение одного worker (сервис доступен),
-  - выключение активного LB (VIP переходит на backup LB).
+- Зафиксировать целевые маршруты в `haproxy_http_routes` для реальных прикладных HTTP-сервисов и применить `playbooks/04-haproxy-keepalived.yml`.
+- Если нужен полностью автоматический rebalance без ручного запуска `run-ansible-from-wsl.ps1`, добавить отдельный watcher/systemd timer поверх `rebalance-swarm-services.ps1`.
+- Наблюдать recovery window после power cycle: отдельные VM могут возвращаться в `Ready` не мгновенно, а спустя несколько минут после старта.
 - Пересобрать финальный snapshot golden VM после полной очистки (`cloud-init`, `machine-id`, `ssh_host_*`), чтобы зафиксировать эталонный образ.
 - При необходимости ужесточить security-профиль:
   - вынести `keepalived_auth_pass` из `group_vars/all.yml` в `Ansible Vault`;
@@ -104,6 +140,45 @@
   - подтвержден failover LB:
     - после выключения `kp-lb-01` VIP продолжает обслуживаться по тому же адресу `192.168.56.10`;
     - VIP переезжает на `kp-lb-02`, клиентский адрес не меняется.
+- 2026-04-12:
+  - выполнена фактическая проверка stack-сервиса `pageview` (`naurlox123/naurlox:pageview-v1`, `replicas=3`, `*:3000-3001->3000/tcp`);
+  - подтверждено распределение запросов routing mesh по трем контейнерам по ответам `/api/stats`;
+  - подтвержден отказ worker:
+    - после выключения `kp-worker-01` сервис остался доступен;
+    - Swarm пересоздал недостающую задачу на `kp-worker-02`;
+    - после возврата `kp-worker-01` автоматического rebalance не произошло;
+  - подтвержден failover LB на текущем HTTP-контуре:
+    - после выключения `kp-lb-01` VIP `192.168.56.10` переехал на `kp-lb-02`;
+    - `curl http://192.168.56.10` продолжил отвечать `503`, что соответствует живому HAProxy/VIP без backend на `:80`;
+  - по HAProxy CSV stats подтверждено:
+    - `swarm_managers_nodes = UP`;
+    - `swarm_http_nodes = DOWN`, потому что `pageview` опубликован на `:3000/:3001`, а HAProxy в текущей конфигурации маршрутизирует только `:80`;
+  - подтвержден отказ одного follower-manager:
+    - при выключении `kp-manager-02` кворум сохранился, `kp-manager-01` остался `Leader`, а `pageview` продолжил работать в `3/3`;
+    - после дополнительного ожидания `kp-manager-02` вернулся в `Ready/Reachable`, то есть речь шла о delayed recovery, а не о постоянной потере ноды;
+  - добавлен `infra/scripts/rebalance-swarm-services.ps1`:
+    - скрипт выбирает reachable manager из inventory;
+    - находит сервисы с label `com.kp.auto_rebalance=true`;
+    - если после возврата worker-ноды такие сервисы не распределены по всем ready worker-нодам, запускает rolling `docker service update --force`;
+  - `infra/scripts/run-ansible-from-wsl.ps1` теперь вызывает post-recovery rebalance автоматически после успешного прогона playbook;
+  - `infra/ansible/group_vars/all.yml` и `infra/ansible/templates/haproxy.cfg.j2` расширены переменной `haproxy_http_routes` для host-based routing нескольких HTTP-сервисов через один VIP;
+  - включен и проверен маршрут `pageview.local -> :3000`:
+    - `playbooks/04-haproxy-keepalived.yml` применен успешно;
+    - `curl -H "Host: pageview.local" http://192.168.56.10/api/stats` проходит через VIP/HAProxy к `pageview`;
+    - в stats подтвержден отдельный `pageview_backend = UP`;
+  - `infra/test/docker-stack.yml` помечен label `com.kp.auto_rebalance=true`, чтобы тестовый `pageview` мог участвовать в автоматическом post-recovery rebalance после следующего redeploy стека;
+  - выполнен redeploy `pageview` с `export PAGE_VIEW_IMAGE=naurlox123/naurlox:pageview-v1`, после чего label `com.kp.auto_rebalance=true` подтвержден через `docker service inspect`;
+  - зафиксированы рабочие endpoint-ы `pageview`:
+    - прямой ingress через `http://<swarm-node-ip>:3000` и `http://<swarm-node-ip>:3001`;
+    - внутренние endpoint-ы приложения: `/`, `/api/stats`, `/health`, `/metrics`;
+    - VIP-доступ после настройки `haproxy_http_routes`: `curl -H "Host: pageview.local" http://192.168.56.10/...`;
+  - подтвержден ручной rebalance `pageview` через `docker service update --force pageview_page_view_demo`:
+    - сервис продолжает отвечать через три разные реплики;
+    - итоговая раскладка задач по двум worker-нодам остается ожидаемой `2+1`;
+  - README и `infra/test/README.md` дополнены практикой:
+    - один VIP для многих HTTP-сервисов;
+    - host-based routing через HAProxy;
+    - auto-rebalance только для явно помеченных сервисов.
 
 ## Примечания
 - Этот файл является единым источником правды по проекту:

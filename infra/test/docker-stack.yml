@@ -1,0 +1,34 @@
+version: "3.9"
+
+services:
+  page_view_demo:
+    image: ${PAGE_VIEW_IMAGE}
+    environment:
+      PORT: "3000"
+    ports:
+      - target: 3000
+        published: 3000
+        protocol: tcp
+        mode: ingress
+      - target: 3000
+        published: 3001
+        protocol: tcp
+        mode: ingress
+    deploy:
+      replicas: 3
+      labels:
+        com.kp.auto_rebalance: "true"
+      restart_policy:
+        condition: any
+      update_config:
+        order: start-first
+      placement:
+        constraints:
+          - node.role == worker
+    networks:
+      - page_view_net
+
+networks:
+  page_view_net:
+    driver: overlay
+    attachable: true

@@ -172,6 +172,11 @@ ANSIBLE_CONFIG=$PWD/ansible.cfg ANSIBLE_HOST_KEY_CHECKING=False ansible-playbook
 
 `run-ansible-from-wsl.ps1` перед запуском playbook синхронизирует Windows `known_hosts`, чтобы после пересоздания VM не требовался ручной `ssh-keygen -R`.
 
+После успешного прогона playbook скрипт дополнительно вызывает `infra/scripts/rebalance-swarm-services.ps1`:
+- он ищет сервисы с label `com.kp.auto_rebalance=true`;
+- если восстановившийся worker уже `Ready/Active`, но на нем нет задач такого сервиса, скрипт запускает rolling rebalance через `docker service update --force`;
+- это не "мгновенный перенос задач", а штатный rolling restart выбранных сервисов.
+
 ## 7) Проверка
 
 На manager-01:
@@ -190,10 +195,12 @@ docker service create --name web --replicas 3 -p 80:80 nginx
 
 Примечания:
 - если backend-сервис на `:80` еще не развернут, VIP может возвращать `503` от HAProxy — это означает, что входной слой жив, но публикуемого приложения за ним пока нет;
-- если worker-нода вернулась после отказа, Swarm не обязан автоматически переразложить задачи обратно; для повторного распределения используйте:
+- если сервис помечен label `com.kp.auto_rebalance=true`, `run-ansible-from-wsl.ps1` после успешного подключения к восстановившимся нодам попробует запустить rolling rebalance автоматически;
+- если нужен ручной rebalance без Ansible, используйте:
 
 ```bash
-docker service update --force web
+cd infra/scripts
+.\rebalance-swarm-services.ps1
 ```
 
 - текущий `infra/ansible/templates/haproxy.cfg.j2` маршрутизирует HTTP только на workers; это ближе к production-практике и не смешивает прикладной трафик с manager control plane;
@@ -245,6 +252,215 @@ docker stack rm app
 - для прикладных сервисов лучше задавать `placement.constraints`, чтобы не размещать нагрузку на managers без необходимости;
 - при нескольких сервисах в одном стеке удобнее версионировать их вместе, чем управлять каждым через отдельные `docker service create/update`.
 - текущая конфигурация HAProxy уже соответствует этому подходу: HTTP трафик идет только на worker-ноды.
+- если хотите, чтобы сервис автоматически участвовал в post-recovery rebalance после возврата worker-ноды, добавьте label:
+
+```yaml
+deploy:
+  labels:
+    com.kp.auto_rebalance: "true"
+```
+
+### Практический пример: стек `pageview`
+
+Текущий тестовый сервис находится в:
+
+- `infra/test/docker-stack.yml`
+- `infra/test/react-monitoring-demo/`
+
+Текущий образ:
+
+```text
+naurlox123/naurlox:pageview-v1
+```
+
+Важно:
+- `docker stack deploy` нужно запускать на manager-ноду;
+- stack-файл должен существовать на самой manager-ноде;
+- переменная `PAGE_VIEW_IMAGE` должна быть экспортирована в той же shell-сессии, где выполняется `docker stack deploy`.
+
+Пример из Windows-хоста:
+
+```powershell
+scp .\infra\test\docker-stack.yml naurlox@192.168.56.11:~/docker-stack.yml
+ssh naurlox@192.168.56.11
+```
+
+Дальше на manager:
+
+```bash
+export PAGE_VIEW_IMAGE=naurlox123/naurlox:pageview-v1
+docker stack deploy -c ~/docker-stack.yml pageview
+```
+
+Проверка:
+
+```bash
+docker stack services pageview
+docker service ps pageview_page_view_demo
+docker service inspect pageview_page_view_demo --format '{{json .Spec.Labels}}'
+```
+
+Ожидаемо:
+- label `com.kp.auto_rebalance=true` присутствует;
+- при `3 replicas` и `2 workers` итоговая раскладка будет `2+1`, а не `1+1+1`.
+
+Замечание по warning:
+
+```text
+image ... could not be accessed on a registry to record its digest
+```
+
+Для лабораторного стенда это допустимо. Для более строгого режима лучше использовать immutable tag или deploy по digest.
+
+#### Endpoint-ы `pageview`
+
+Сервис публикуется в ingress mode на `3000` и `3001`.
+
+Прямой доступ через любую Swarm-ноду:
+
+```text
+http://192.168.56.11:3000/
+http://192.168.56.12:3000/
+http://192.168.56.21:3000/
+http://192.168.56.22:3000/
+
+http://192.168.56.11:3001/
+http://192.168.56.12:3001/
+http://192.168.56.21:3001/
+http://192.168.56.22:3001/
+```
+
+Поддерживаемые endpoint-ы приложения:
+
+```text
+/
+/api/stats
+/health
+/metrics
+```
+
+Примеры:
+
+```bash
+curl http://192.168.56.11:3000/
+curl http://192.168.56.11:3000/api/stats
+curl http://192.168.56.11:3000/health
+curl http://192.168.56.11:3000/metrics
+```
+
+Проверка фактической балансировки:
+
+```bash
+for i in {1..10}; do curl -s http://127.0.0.1:3000/api/stats; echo; done
+```
+
+Если в ответах меняется `hostname`, значит routing mesh реально распределяет запросы по разным репликам.
+
+Проверка размещения контейнеров по worker-нодам:
+
+```powershell
+ssh naurlox@192.168.56.21 "docker ps --format 'table {{.Names}}\t{{.Status}}'"
+ssh naurlox@192.168.56.22 "docker ps --format 'table {{.Names}}\t{{.Status}}'"
+```
+
+Ребаланс:
+
+```bash
+docker service update --force pageview_page_view_demo
+```
+
+или из Windows:
+
+```powershell
+cd infra\scripts
+.\rebalance-swarm-services.ps1
+```
+
+Поведение:
+- при отказе одного worker Swarm пересоздаст недостающую задачу на оставшемся worker;
+- после возврата worker автоматического rebalance в самом Swarm нет;
+- в этом проекте rebalance делается через rolling `docker service update --force` для сервисов с label `com.kp.auto_rebalance=true`.
+
+Полный lifecycle- и failover-runbook для `pageview` вынесен в:
+
+- [infra/test/README.md](C:\Users\Nvidia\Desktop\Kwork_labs\KP\infra\test\README.md)
+
+Там собраны отдельные команды для:
+- `deploy / restart / stop / start / remove`;
+- проверки worker failover;
+- проверки manager quorum;
+- проверки failover балансировщика и сохранения VIP.
+
+### Как гонять 5-10 HTTP-сервисов через один VIP
+
+Для нескольких HTTP-сервисов не нужно поднимать отдельный VIP или отдельный внешний порт на каждый сервис.
+
+Нормальная схема такая:
+- снаружи у вас один VIP, обычно `80/443`;
+- HAProxy на LB смотрит на `Host` header или path;
+- дальше он отправляет трафик на опубликованный ingress-порт нужного сервиса на worker-нодах;
+- routing mesh Swarm уже доставляет запрос до живой реплики.
+
+В проект уже добавлена заготовка для такого режима через переменную `haproxy_http_routes` в `infra/ansible/group_vars/all.yml`.
+
+Пример:
+
+```yaml
+haproxy_http_routes:
+  - name: pageview
+    host: pageview.local
+    backend_port: 3000
+#  - name: api
+#    host: api.local
+#    backend_port: 8080
+```
+
+После этого примените только HAProxy/Keepalived:
+
+```powershell
+cd infra\scripts
+.\run-ansible-from-wsl.ps1 -Playbook playbooks/04-haproxy-keepalived.yml
+```
+
+Проверка с хоста:
+
+```powershell
+curl -H "Host: pageview.local" http://192.168.56.10/
+# после включения api.local и деплоя сервиса на :8080
+curl -H "Host: api.local" http://192.168.56.10/
+```
+
+Текущее фактически проверенное состояние стенда:
+- в `infra/ansible/group_vars/all.yml` уже включен маршрут:
+
+```yaml
+haproxy_http_routes:
+  - name: pageview
+    host: pageview.local
+    backend_port: 3000
+```
+
+- после применения `playbooks/04-haproxy-keepalived.yml` подтверждено:
+  - `api.local` пока оставлен в виде шаблона и не включается по умолчанию, пока в Swarm нет реального backend-сервиса на `:8080`;
+  - иначе HAProxy начнет честно показывать отдельный backend в статусе `DOWN`, что в текущем стенде будет просто шумом;
+  - `curl -H "Host: pageview.local" http://192.168.56.10/api/stats` возвращает ответ приложения;
+  - в HAProxy stats backend `pageview_backend` находится в статусе `UP`;
+  - backend `swarm_http_nodes` при этом может оставаться `DOWN`, если на `:80` нет отдельного сервиса, и это нормально.
+
+После настройки маршрута для `pageview` за VIP будут доступны те же endpoint-ы приложения:
+
+```powershell
+curl -H "Host: pageview.local" http://192.168.56.10/
+curl -H "Host: pageview.local" http://192.168.56.10/api/stats
+curl -H "Host: pageview.local" http://192.168.56.10/health
+curl -H "Host: pageview.local" http://192.168.56.10/metrics
+```
+
+Если хотите открывать сервисы из браузера без ручного `Host` header, добавьте локальные DNS/hosts-записи на Windows для нужных имен на `192.168.56.10`.
+
+Итог:
+- для 5-10 HTTP-сервисов используйте один VIP и host-based routing;
+- отдельные frontend/backend по портам нужны только для TCP-сервисов или если вы осознанно хотите разные внешние порты.
 
 ## 7.2) Секреты и Ansible Vault
 

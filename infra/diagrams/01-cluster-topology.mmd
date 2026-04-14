@@ -1,0 +1,59 @@
+---
+id: 4593bcc1-2c9a-4567-9905-9e79f07d64b6
+---
+%% Диаграмма 1. Общая топология отказоустойчивого кластера Docker Swarm.
+flowchart TB
+  user["Пользователь<br/>браузер / curl"]
+
+  subgraph hostonly["Внутренняя сеть Host-Only 192.168.56.0/24 (enp0s3)"]
+    vip["VIP 192.168.56.10"]
+
+    subgraph lbs["Слой балансировки"]
+      lb1["kp-lb-01<br/>192.168.56.31<br/>HAProxy + Keepalived<br/>Статистика :8404"]
+      lb2["kp-lb-02<br/>192.168.56.32<br/>HAProxy + Keepalived<br/>Статистика :8404"]
+    end
+
+    subgraph managers["Manager-ноды Swarm"]
+      m1["kp-manager-01<br/>192.168.56.11<br/>Лидер"]
+      m2["kp-manager-02<br/>192.168.56.12<br/>Доступен"]
+      m3["kp-manager-03<br/>192.168.56.13<br/>Доступен"]
+    end
+
+    subgraph workers["Worker-ноды Swarm"]
+      w1["kp-worker-01<br/>192.168.56.21"]
+      w2["kp-worker-02<br/>192.168.56.22"]
+    end
+  end
+
+  nat["Сеть NAT / выход в интернет<br/>(enp0s8 на каждой VM)"]
+
+  user --> vip
+  vip -. активный владелец VIP .-> lb1
+  vip -. резервный владелец VIP .-> lb2
+
+  lb1 -->|"HTTP :80"| w1
+  lb1 -->|"HTTP :80"| w2
+  lb2 -->|"HTTP :80"| w1
+  lb2 -->|"HTTP :80"| w2
+
+  lb1 -->|"Swarm join :2377"| m1
+  lb1 -->|"Swarm join :2377"| m2
+  lb1 -->|"Swarm join :2377"| m3
+  lb2 -->|"Swarm join :2377"| m1
+  lb2 -->|"Swarm join :2377"| m2
+  lb2 -->|"Swarm join :2377"| m3
+
+  m1 <-->|"Raft-кворум"| m2
+  m2 <-->|"Raft-кворум"| m3
+  m1 <-->|"Raft-кворум"| m3
+
+  m1 -. планирует задачи .-> w1
+  m1 -. планирует задачи .-> w2
+
+  lb1 -. исходящий трафик .-> nat
+  lb2 -. исходящий трафик .-> nat
+  m1 -. исходящий трафик .-> nat
+  m2 -. исходящий трафик .-> nat
+  m3 -. исходящий трафик .-> nat
+  w1 -. исходящий трафик .-> nat
+  w2 -. исходящий трафик .-> nat

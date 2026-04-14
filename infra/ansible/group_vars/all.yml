@@ -15,3 +15,15 @@ haproxy_stats_port: 8404
 haproxy_stats_uri: /stats
 haproxy_stats_user: admin
 haproxy_stats_password: admin
+
+# Дополнительные HTTP-маршруты через один VIP по Host header.
+# Активные маршруты попадут в HAProxy-конфиг.
+# `api.local` можно включить, когда в Swarm появится сервис,
+# опубликованный на `:8080`.
+haproxy_http_routes:
+  - name: pageview
+    host: pageview.local
+    backend_port: 3000
+#   - name: api
+#     host: api.local
+#     backend_port: 8080

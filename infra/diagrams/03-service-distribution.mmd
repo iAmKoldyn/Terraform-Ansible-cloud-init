@@ -1,0 +1,38 @@
+%% Диаграмма 3. Распределение ролей и сервисов по нодам.
+flowchart LR
+  subgraph edge["Входной слой"]
+    lb1["kp-lb-01<br/>HAProxy<br/>Keepalived<br/>Страница статистики :8404"]
+    lb2["kp-lb-02<br/>HAProxy<br/>Keepalived<br/>Страница статистики :8404"]
+  end
+
+  subgraph control["Control plane / кворум"]
+    m1["kp-manager-01<br/>Docker Engine<br/>Swarm manager<br/>Лидер"]
+    m2["kp-manager-02<br/>Docker Engine<br/>Swarm manager<br/>Доступен"]
+    m3["kp-manager-03<br/>Docker Engine<br/>Swarm manager<br/>Доступен"]
+  end
+
+  subgraph workload["Слой прикладной нагрузки"]
+    w1["kp-worker-01<br/>Docker Engine<br/>app_web.1<br/>app_web.2"]
+    w2["kp-worker-02<br/>Docker Engine<br/>app_web.3"]
+  end
+
+  vip["VIP 192.168.56.10"]
+  policy["Политика маршрутизации<br/>HTTP backend -> только workers<br/>Swarm join -> managers:2377"]
+
+  vip --> lb1
+  vip --> lb2
+
+  lb1 --> w1
+  lb1 --> w2
+  lb2 --> w1
+  lb2 --> w2
+
+  m1 <-->|Raft| m2
+  m2 <-->|Raft| m3
+  m1 <-->|Raft| m3
+
+  m1 -. планирует реплики .-> w1
+  m1 -. планирует реплики .-> w2
+
+  policy -.-> lb1
+  policy -.-> lb2

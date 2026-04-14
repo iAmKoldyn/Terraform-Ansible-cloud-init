@@ -1,0 +1,35 @@
+@startuml
+title Прохождение запроса через VIP, HAProxy и Docker Swarm
+
+actor Client as "Клиент"
+participant VIP as "VIP 192.168.56.10"
+participant LB as "Активный LB\nHAProxy + Keepalived"
+participant Worker as "Worker-нода\nпубликуемый порт :80"
+participant Swarm as "Маршрутизация Swarm"
+participant Replica as "Реплика сервиса\n(web / whoami / stack service)"
+
+Client -> VIP: HTTP GET /
+VIP -> LB: пакет приходит на текущего владельца VIP
+LB -> Worker: round-robin на HTTP :80
+Worker -> Swarm: определение целевой service endpoint
+Swarm -> Replica: передача запроса живой задаче
+Replica --> Swarm: HTTP 200
+Swarm --> LB: HTTP 200
+LB --> Client: HTTP 200
+
+alt активный LB отказал
+  participant LB2 as "Резервный LB\nHAProxy + Keepalived"
+  VIP -> LB2: Keepalived переносит VIP
+  Client -> VIP: HTTP GET /
+  LB2 -> Worker: round-robin на HTTP :80
+  Worker -> Swarm: определение service endpoint
+  Swarm -> Replica: передача запроса
+  Replica --> Client: HTTP 200
+end
+
+note over LB,Worker
+HAProxy отправляет HTTP-трафик только на worker-ноды.
+Manager-ноды используются только для control-plane Swarm на :2377.
+end note
+
+@enduml

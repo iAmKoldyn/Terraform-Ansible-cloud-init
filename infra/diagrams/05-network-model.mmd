@@ -1,0 +1,35 @@
+%% Диаграмма 5. Сетевая модель кластера: что смотрит внутрь, а что наружу.
+flowchart LR
+  user["Windows-хост<br/>PowerShell / браузер / SSH"]
+  internet["Интернет / APT / Docker registry"]
+
+  subgraph vm["Каждая VM в кластере"]
+    hif["enp0s3<br/>Host-Only<br/>внутренняя сеть кластера"]
+    nif["enp0s8<br/>NAT<br/>исходящий внешний трафик"]
+  end
+
+  subgraph cluster["Сеть 192.168.56.0/24 через Host-Only"]
+    vip["VIP 192.168.56.10"]
+    lb["LB-ноды<br/>31, 32"]
+    mgr["Manager-ноды<br/>11, 12, 13"]
+    wrk["Worker-ноды<br/>21, 22"]
+  end
+
+  user -->|"SSH, curl, браузер"| hif
+  hif --> vip
+  hif --> lb
+  hif --> mgr
+  hif --> wrk
+
+  lb -->|"HTTP :80"| wrk
+  lb -->|"Swarm join :2377"| mgr
+  mgr <-->|"Raft / control plane"| mgr
+  mgr -->|"Планирование задач"| wrk
+
+  nif -->|"apt, пакеты, обновления, registry"| internet
+
+  note1["Внутрь кластера смотрит Host-Only:<br/>SSH, VIP, Keepalived, HAProxy backend,<br/>трафик между manager и worker"]
+  note2["Наружу смотрит NAT:<br/>исходящий доступ в интернет,<br/>но не адрес для входа в кластер"]
+
+  note1 -.-> hif
+  note2 -.-> nif

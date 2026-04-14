@@ -13,12 +13,30 @@ defaults
 
 frontend swarm_http
   bind *:80
+{% for route in haproxy_http_routes | default([]) %}
+  acl host_{{ route.name | replace('-', '_') }} hdr(host) -i {{ route.host }}
+{% if route.path_prefix is defined %}
+  acl path_{{ route.name | replace('-', '_') }} path_beg {{ route.path_prefix }}
+  use_backend {{ route.name }}_backend if host_{{ route.name | replace('-', '_') }} path_{{ route.name | replace('-', '_') }}
+{% else %}
+  use_backend {{ route.name }}_backend if host_{{ route.name | replace('-', '_') }}
+{% endif %}
+{% endfor %}
   default_backend swarm_http_nodes
 
 backend swarm_http_nodes
   balance roundrobin
 {% for host in groups['workers'] %}
   server {{ host }} {{ hostvars[host].ansible_host }}:80 check
+{% endfor %}
+
+{% for route in haproxy_http_routes | default([]) %}
+backend {{ route.name }}_backend
+  balance roundrobin
+{% for host in groups['workers'] %}
+  server {{ host }} {{ hostvars[host].ansible_host }}:{{ route.backend_port }} check
+{% endfor %}
+
 {% endfor %}
 
 frontend swarm_managers
